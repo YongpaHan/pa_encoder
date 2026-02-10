@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pa_encoder</title>
+    <style>
+      :root {
+        --panel-bg: rgba(16, 16, 18, 0.92);
+        --panel-border: rgba(255, 255, 255, 0.12);
+        --text: rgba(255, 255, 255, 0.92);
+        --muted: rgba(255, 255, 255, 0.62);
+
+        --surface: rgba(255, 255, 255, 0.06);
+        --surface-2: rgba(255, 255, 255, 0.1);
+        --border: rgba(255, 255, 255, 0.14);
+
+        --primary: #2f6df6;
+        --primary-hover: #3d7bff;
+
+        --danger: #e5484d;
+        --danger-hover: #ff5a60;
+
+        --shadow: 0 14px 42px rgba(0, 0, 0, 0.45);
+        --radius: 14px;
+        --ring: 0 0 0 3px rgba(47, 109, 246, 0.35);
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+          Helvetica, Arial;
+        color: var(--text);
+        overflow: hidden; /* prevent any page-level horizontal scroll */
+      }
+
+      /* Preview fills the viewport */
+      #previewWrap {
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+      }
+      #preview {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        border: 0;
+        pointer-events: none; /* default: UI captures mouse */
+      }
+
+      /* UI overlay root */
+      #root {
+        position: fixed;
+        inset: 0;
+        z-index: 1;
+        pointer-events: none;
+      }
+
+      /* Panel */
+      #panel {
+        position: fixed;
+        pointer-events: auto;
+
+        width: clamp(320px, 34vw, 520px);
+        max-height: min(78vh, 720px);
+
+        background: var(--panel-bg);
+        border: 1px solid var(--panel-border);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(10px);
+
+        display: flex;
+        flex-direction: column;
+        overflow: hidden; /* scrolling happens in middle area */
+      }
+
+      /* Dock positions */
+      body.dock-br #panel {
+        right: 16px;
+        bottom: 16px;
+      }
+      body.dock-bl #panel {
+        left: 16px;
+        bottom: 16px;
+      }
+      body.dock-tr #panel {
+        right: 16px;
+        top: 16px;
+      }
+      body.dock-tl #panel {
+        left: 16px;
+        top: 16px;
+      }
+
+      /* Header */
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 12px 12px 10px 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .title {
+        font-weight: 700;
+        font-size: 14px;
+        letter-spacing: 0.2px;
+      }
+      .topbtns {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+
+      /* Controls area: scroll container */
+      .content {
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden; /* key: prevent horizontal scroll */
+        padding: 12px;
+      }
+
+      /* Footer log: fixed height */
+      .log {
+        border-top: 1px solid var(--border);
+        padding: 10px 12px;
+        height: 128px;
+        overflow: auto;
+
+        background: rgba(0, 0, 0, 0.28);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+        font-size: 12.5px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      /* Inputs */
+      button,
+      input,
+      select {
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text);
+        padding: 10px 12px;
+        font-size: 14px;
+        outline: none;
+        box-sizing: border-box;
+
+        min-width: 0; /* key: allow shrinking inside grid */
+        width: 100%; /* key: fit grid cell */
+      }
+
+      input:focus,
+      select:focus,
+      button:focus {
+        box-shadow: var(--ring);
+        border-color: rgba(47, 109, 246, 0.55);
+      }
+
+      button {
+        cursor: pointer;
+        user-select: none;
+        background: var(--surface-2);
+      }
+      button:hover {
+        background: rgba(255, 255, 255, 0.12);
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .btnSmall {
+        padding: 8px 10px;
+        font-size: 13px;
+        border-radius: 10px;
+        width: auto; /* small buttons shouldn't stretch */
+        min-width: 0;
+      }
+      .btnGhost {
+        background: transparent;
+      }
+      .btnGhost:hover {
+        background: rgba(255, 255, 255, 0.08);
+      }
+
+      .btnPrimary {
+        background: var(--primary);
+        border-color: rgba(47, 109, 246, 0.55);
+      }
+      .btnPrimary:hover {
+        background: var(--primary-hover);
+      }
+
+      .btnDanger {
+        background: var(--danger);
+        border-color: rgba(229, 72, 77, 0.65);
+      }
+      .btnDanger:hover {
+        background: var(--danger-hover);
+      }
+
+      /* Form rows */
+      .row {
+        display: grid;
+        grid-template-columns: 110px minmax(0, 1fr); /* key */
+        gap: 10px;
+        align-items: center;
+        margin: 10px 0;
+      }
+      .row2 {
+        display: grid;
+        grid-template-columns:
+          110px minmax(0, 1fr)
+          110px minmax(0, 1fr); /* key */
+        gap: 10px;
+        align-items: center;
+        margin: 10px 0;
+      }
+
+      label {
+        color: var(--muted);
+        font-size: 13px;
+        min-width: 0;
+      }
+
+      .btnRow {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .btnRow > button {
+        width: 100%;
+      }
+
+      /* Details sections */
+      details {
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        padding: 10px 10px 6px 10px;
+        background: rgba(255, 255, 255, 0.03);
+        margin: 12px 0;
+        overflow: hidden; /* avoid inner horizontal overflow */
+      }
+      summary {
+        cursor: pointer;
+        list-style: none;
+        font-weight: 650;
+        font-size: 13px;
+        color: rgba(255, 255, 255, 0.82);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        user-select: none;
+      }
+      summary::-webkit-details-marker {
+        display: none;
+      }
+      .summaryHint {
+        color: var(--muted);
+        font-weight: 500;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .hint {
+        color: var(--muted);
+        font-size: 12.5px;
+        line-height: 1.35;
+        margin-top: 10px;
+      }
+
+      /* States */
+      body.hidden #panel {
+        display: none;
+      }
+      body.compact .content details,
+      body.compact .content .advancedRow,
+      body.compact .content .hint {
+        display: none;
+      }
+      body.passthrough #preview {
+        pointer-events: auto;
+      }
+
+      /* Responsive */
+      @media (max-width: 520px) {
+        #panel {
+          width: calc(100vw - 32px);
+        }
+        .row,
+        .row2 {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .btnRow {
+          grid-template-columns: 1fr;
+        }
+        label {
+          margin-bottom: -6px;
+        }
+      }
+    </style>
+  </head>
+
+  <body class="dock-br">
+    <div id="previewWrap">
+      <iframe id="preview"></iframe>
+    </div>
+
+    <div id="root">
+      <div id="panel" role="dialog" aria-label="pa_encoder UI">
+        <div class="topbar">
+          <div class="title">pa_encoder</div>
+          <div class="topbtns">
+            <button id="btnDock" class="btnSmall btnGhost" title="Change dock">
+              Dock
+            </button>
+            <button
+              id="btnCompact"
+              class="btnSmall btnGhost"
+              title="Toggle compact mode"
+            >
+              Compact
+            </button>
+            <button id="btnHide" class="btnSmall btnGhost" title="Hide UI">
+              Hide
+            </button>
+          </div>
+        </div>
+
+        <div class="content">
+          <div
+            class="advancedRow"
+            style="
+              display: flex;
+              gap: 10px;
+              flex-wrap: wrap;
+              margin-bottom: 10px;
+            "
+          >
+            <button
+              id="btnPassthrough"
+              class="btnSmall btnGhost"
+              title="Toggle passthrough (mouse to sketch)"
+            >
+              Passthrough: Off
+            </button>
+            <button
+              id="btnFocus"
+              class="btnSmall btnGhost"
+              title="Focus sketch for keyboard input"
+            >
+              Focus Sketch
+            </button>
+          </div>
+
+          <div class="row">
+            <label>Entry</label>
+            <input id="entry" />
+          </div>
+
+          <div class="row">
+            <label>Mode</label>
+            <select id="mode">
+              <option value="live">Live (realtime)</option>
+              <option value="frame">Frame (deterministic)</option>
+            </select>
+          </div>
+
+          <div class="row">
+            <label>Canvas</label>
+            <select id="canvas"></select>
+          </div>
+
+          <div class="row2">
+            <label>FPS</label>
+            <input id="fps" type="number" min="1" step="1" value="60" />
+            <label>Exporter</label>
+            <select id="exporter">
+              <option value="zip">ZIP (download)</option>
+              <option value="fs">FS (directory)</option>
+              <option value="best">Best (auto)</option>
+            </select>
+          </div>
+
+          <details open id="detailsLive">
+            <summary>
+              <span>Live settings</span>
+              <span class="summaryHint">duration / queue</span>
+            </summary>
+
+            <div class="row2">
+              <label>Policy</label>
+              <select id="policy">
+                <option value="drop">drop</option>
+                <option value="block">block</option>
+              </select>
+              <label>Conc.</label>
+              <input
+                id="concurrency"
+                type="number"
+                min="1"
+                step="1"
+                value="2"
+              />
+            </div>
+
+            <div class="row2">
+              <label>MaxQueue</label>
+              <input id="maxQueue" type="number" min="0" step="1" value="8" />
+              <label>Duration</label>
+              <input id="duration" type="number" min="1" step="1" value="10" />
+            </div>
+          </details>
+
+          <details id="detailsFrame">
+            <summary>
+              <span>Frame settings</span>
+              <span class="summaryHint">frames / warmup</span>
+            </summary>
+
+            <div class="row2">
+              <label>Frames</label>
+              <input id="frames" type="number" min="1" step="1" value="300" />
+              <label>Warmup</label>
+              <input id="warmup" type="number" min="0" step="1" value="0" />
+            </div>
+          </details>
+
+          <div class="btnRow">
+            <button id="btnReload" class="btnGhost">Reload</button>
+            <button id="btnStart" class="btnPrimary">Start</button>
+            <button id="btnStop" class="btnDanger" disabled>Stop</button>
+          </div>
+
+          <div class="hint">
+            Hotkeys (only when not recording):
+            <br />
+            - H: hide UI
+            <br />
+            - P: toggle passthrough
+            <br />
+            - C: compact
+            <br />
+            - D: dock position
+            <br />
+            - Space: start
+            <br />
+            During recording, keyboard is not captured by the UI. Use Focus
+            Sketch if needed, then click the canvas to ensure focus.
+          </div>
+        </div>
+
+        <div id="log" class="log"></div>
+      </div>
+    </div>
+
+    <script type="module" src="/__pa_encoder__/ui/encoder.js"></script>
+  </body>
+</html>

@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Canvas Encoder Demo</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 16px;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+      button {
+        padding: 8px 12px;
+      }
+      select,
+      input {
+        padding: 6px 8px;
+      }
+      #status {
+        white-space: pre;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          monospace;
+        margin-top: 12px;
+      }
+      .box {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 12px;
+        margin-top: 12px;
+      }
+      .label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="row">
+      <label class="label">
+        <span>Mode</span>
+        <select id="mode">
+          <option value="live" selected>Live (record what you see)</option>
+          <option value="virtual">Virtual time (step frames)</option>
+        </select>
+      </label>
+
+      <label class="label">
+        <span>fps</span>
+        <input id="fps" type="number" min="1" max="240" value="30" />
+      </label>
+
+      <label class="label" id="framesWrap" style="display: none">
+        <span>frames</span>
+        <input id="frames" type="number" min="1" max="20000" value="300" />
+      </label>
+
+      <label class="label" id="warmupWrap" style="display: none">
+        <span>warmup</span>
+        <input id="warmup" type="number" min="0" max="1000" value="5" />
+      </label>
+
+      <label class="label" id="policyWrap">
+        <span>policy</span>
+        <select id="policy">
+          <option value="drop" selected>drop</option>
+          <option value="block">block</option>
+        </select>
+      </label>
+
+      <label class="label">
+        <span>concurrency</span>
+        <input id="conc" type="number" min="1" max="8" value="2" />
+      </label>
+
+      <label class="label" id="queueWrap">
+        <span>maxQueue</span>
+        <input id="queue" type="number" min="0" max="200" value="8" />
+      </label>
+
+      <button id="start">Start</button>
+      <button id="stop" disabled>Stop</button>
+    </div>
+
+    <div class="box">
+      <div><b>Notes</b></div>
+      <div>
+        FS(폴더 저장)는 Chromium + secure context(localhost/https)에서
+        동작합니다. 그 외엔 ZIP으로 폴백됩니다.
+      </div>
+      <div>
+        Virtual 모드는 “버튼 클릭 후”에 스케치를 import해야 후킹이 적용됩니다.
+      </div>
+    </div>
+
+    <div id="status" class="box">idle</div>
+
+    <script type="module">
+      import { startLiveCapture } from "../src/live.js";
+      import { virtualTimeCapture } from "../src/virtual_capture.js";
+      import { createBestExporter } from "../src/exporters/best.js";
+
+      const $ = (id) => document.getElementById(id);
+
+      const modeEl = $("mode");
+      const fpsEl = $("fps");
+      const framesEl = $("frames");
+      const warmupEl = $("warmup");
+      const policyEl = $("policy");
+      const concEl = $("conc");
+      const queueEl = $("queue");
+
+      const framesWrap = $("framesWrap");
+      const warmupWrap = $("warmupWrap");
+      const policyWrap = $("policyWrap");
+      const queueWrap = $("queueWrap");
+
+      const startBtn = $("start");
+      const stopBtn = $("stop");
+      const status = $("status");
+
+      let liveSession = null;
+
+      function uiSync() {
+        const mode = modeEl.value;
+        const isLive = mode === "live";
+        framesWrap.style.display = isLive ? "none" : "";
+        warmupWrap.style.display = isLive ? "none" : "";
+        policyWrap.style.display = isLive ? "" : "none";
+        queueWrap.style.display = isLive ? "" : "none";
+      }
+      modeEl.addEventListener("change", uiSync);
+      uiSync();
+
+      function renderLiveStats(s) {
+        status.textContent =
+          `mode: live\n` +
+          `captured:  ${s.captured}\n` +
+          `encoded:   ${s.encoded}\n` +
+          `written:   ${s.written}\n` +
+          `dropped:   ${s.dropped}\n\n` +
+          `bitmap(ms): last=${s.lastBitmapMs.toFixed(
+            2
+          )}  avg=${s.bitmapMsAvg.toFixed(2)}\n` +
+          `encode(ms): last=${s.lastEncodeMs.toFixed(
+            2
+          )}  avg=${s.encodeMsAvg.toFixed(2)}\n` +
+          `write(ms):  last=${s.lastWriteMs.toFixed(
+            2
+          )}  avg=${s.writeMsAvg.toFixed(2)}\n\n` +
+          `queueMax:   ${s.queueMax}\n` +
+          `inFlightMax:${s.inFlightMax}\n`;
+      }
+
+      function renderVirtualProgress(done, total, extra) {
+        status.textContent =
+          `mode: virtual\n` +
+          `captured: ${done}/${total}\n` +
+          `virtualNowMs: ${Math.round(extra?.nowMs ?? 0)}\n`;
+      }
+
+      async function pickExporter() {
+        // Must be called inside user gesture (click) for FS picker
+        return await createBestExporter({
+          prefer: "fs",
+          fs: {
+            dirNameHint: "frames",
+            filename: (i) => `frame_${String(i).padStart(6, "0")}.png`,
+          },
+          zip: {
+            zipName: "frames.zip",
+            filename: (i) => `frame_${String(i).padStart(6, "0")}.png`,
+          },
+        });
+      }
+
+      // Ensure demo sketch runs for LIVE mode (needs a canvas)
+      let sketchLoadedForLive = false;
+      async function ensureSketchLoadedForLive() {
+        if (sketchLoadedForLive) return;
+        // For live mode, it's fine to load immediately (no hooks required)
+        await import("./sketch.js");
+        sketchLoadedForLive = true;
+      }
+
+      startBtn.addEventListener("click", async () => {
+        startBtn.disabled = true;
+        stopBtn.disabled = true;
+        status.textContent = "preparing…";
+
+        const mode = modeEl.value;
+        const fps = Number(fpsEl.value);
+        const concurrency = Number(concEl.value);
+
+        try {
+          const exporter = await pickExporter();
+
+          if (mode === "live") {
+            await ensureSketchLoadedForLive();
+
+            // demo/sketch.js creates a canvas and appends to body.
+            // If your real sketch canvas has a known selector, use it here.
+            const canvas = document.querySelector("canvas");
+            if (!(canvas instanceof HTMLCanvasElement)) {
+              throw new Error("No canvas found for live mode.");
+            }
+
+            const policy = policyEl.value;
+            const maxQueue = Number(queueEl.value);
+
+            liveSession = await startLiveCapture({
+              canvas,
+              exporter,
+              fps,
+              concurrency,
+              maxQueue,
+              policy,
+              onProgress: renderLiveStats,
+            });
+
+            status.textContent = "live capturing…";
+            stopBtn.disabled = false;
+          } else {
+            // Virtual mode: MUST install hooks before importing the sketch
+            // So we import inside virtualTimeCapture via loadSketch
+            const frames = Number(framesEl.value);
+            const warmupFrames = Number(warmupEl.value);
+
+            status.textContent = "virtual capturing…";
+
+            await virtualTimeCapture({
+              loadSketch: () => import("./sketch.js"),
+              // canvas: "#defaultCanvas0", // p5라면 이걸 권장
+              fps,
+              frames,
+              warmupFrames,
+              exporter,
+              concurrency,
+              onProgress: renderVirtualProgress,
+            });
+
+            status.textContent += "\nDone.";
+            stopBtn.disabled = true;
+          }
+        } catch (e) {
+          console.error(e);
+          status.textContent = `Error: ${e?.message ?? e}`;
+          stopBtn.disabled = true;
+        } finally {
+          startBtn.disabled = false;
+        }
+      });
+
+      stopBtn.addEventListener("click", async () => {
+        stopBtn.disabled = true;
+        status.textContent += "\nstopping…";
+        try {
+          await liveSession?.stop();
+          status.textContent += "\nDone.";
+        } catch (e) {
+          console.error(e);
+          status.textContent += `\nError: ${e?.message ?? e}`;
+        } finally {
+          liveSession = null;
+        }
+      });
+    </script>
+  </body>
+</html>

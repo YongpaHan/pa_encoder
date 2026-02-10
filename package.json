@@ -1,0 +1,29 @@
+{
+  "name": "pa_encoder",
+  "license": "MIT",
+  "version": "0.2.8",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "pa_encoder": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsup --config tsup.config.js && cp src/worker.js dist/worker.js && mkdir -p dist/ui && cp src/ui/encoder.html dist/ui/encoder.html && cp src/ui/encoder.js dist/ui/encoder.js && cp src/ui/preview.html dist/ui/preview.html && cp src/ui/preview.js dist/ui/preview.js && cp src/cli.js dist/cli.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.9.3"
+  }
+}
