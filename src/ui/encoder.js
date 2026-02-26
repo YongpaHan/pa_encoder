@@ -14,6 +14,8 @@ const policyEl = $("policy");
 const concurrencyEl = $("concurrency");
 const maxQueueEl = $("maxQueue");
 const durationEl = $("duration");
+const maxPendingCapturesEl = $("maxPendingCaptures");
+const statsIntervalMsEl = $("statsIntervalMs");
 
 const framesEl = $("frames");
 const warmupEl = $("warmup");
@@ -33,6 +35,7 @@ const btnPassthrough = $("btnPassthrough");
 const btnFocus = $("btnFocus");
 
 const logEl = $("log");
+const statsEl = $("stats");
 const preview = $("preview");
 
 let running = false;
@@ -42,11 +45,37 @@ const docks = ["dock-br", "dock-bl", "dock-tr", "dock-tl"];
 let dockIndex = 0;
 
 let passthrough = false;
+let lastStatusLog = "";
+
+const LOG_MAX_LINES = 220;
+const logLines = [];
+const runtimeState = {
+  status: "idle",
+  message: "",
+  progressDone: 0,
+  progressTotal: 0,
+  stats: null,
+};
+
+function toPositiveInt(v, fallback) {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n <= 0) return fallback;
+  return n;
+}
+
+function toNonNegativeNumber(v, fallback) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n;
+}
 
 function appendLog(line) {
-  const s = String(line);
-  const needsNL = logEl.textContent && !logEl.textContent.endsWith("\n");
-  logEl.textContent += (needsNL ? "\n" : "") + s;
+  const s = String(line ?? "");
+  logLines.push(s);
+  if (logLines.length > LOG_MAX_LINES) {
+    logLines.splice(0, logLines.length - LOG_MAX_LINES);
+  }
+  logEl.textContent = logLines.join("\n");
   logEl.scrollTop = logEl.scrollHeight;
 }
 
@@ -63,6 +92,52 @@ function setRunning(v) {
       canvasSelector: selectedCanvasSelector(),
     });
   }
+}
+
+function nfmt(v, d = 2) {
+  if (!Number.isFinite(v)) return "-";
+  return Number(v).toFixed(d);
+}
+
+function renderStats() {
+  const s = runtimeState.stats || null;
+  const lines = [];
+
+  lines.push(
+    `status: ${runtimeState.status}${
+      runtimeState.message ? ` (${runtimeState.message})` : ""
+    }`
+  );
+
+  if (runtimeState.progressTotal > 0) {
+    lines.push(`progress: ${runtimeState.progressDone}/${runtimeState.progressTotal}`);
+  }
+
+  if (!s) {
+    lines.push("captured: -  encoded: -  written: -");
+    lines.push("dropped: -   failed: -");
+    lines.push("bitmap ms: -/-   encode ms: -/-   write ms: -/-");
+    lines.push("queueMax: -   inFlightMax: -   pendingMax: -");
+  } else {
+    lines.push(
+      `captured: ${s.captured ?? 0}  encoded: ${s.encoded ?? 0}  written: ${
+        s.written ?? 0
+      }`
+    );
+    lines.push(`dropped: ${s.dropped ?? 0}   failed: ${s.failed ?? 0}`);
+    lines.push(
+      `bitmap ms: ${nfmt(s.lastBitmapMs)}/${nfmt(s.bitmapMsAvg)}   ` +
+        `encode ms: ${nfmt(s.lastEncodeMs)}/${nfmt(s.encodeMsAvg)}   ` +
+        `write ms: ${nfmt(s.lastWriteMs)}/${nfmt(s.writeMsAvg)}`
+    );
+    lines.push(
+      `queueMax: ${s.queueMax ?? 0}   inFlightMax: ${
+        s.inFlightMax ?? 0
+      }   pendingMax: ${s.pendingCaptureMax ?? 0}`
+    );
+  }
+
+  statsEl.textContent = lines.join("\n");
 }
 
 function buildPreviewUrl(entry) {
@@ -161,9 +236,13 @@ function syncModeUI() {
 }
 
 function currentPayload() {
-  const fps = Number(fpsEl.value || "60");
+  const fps = Math.max(1, Math.floor(Number(fpsEl.value || "60")));
   const kind = modeEl.value === "frame" ? "frame" : "live";
   const canvasSelector = selectedCanvasSelector();
+  const statsIntervalMs = Math.max(
+    50,
+    toPositiveInt(statsIntervalMsEl.value, 180)
+  );
 
   if (kind === "frame") {
     const frames = Math.max(1, Math.floor(Number(framesEl.value || "300")));
@@ -174,11 +253,17 @@ function currentPayload() {
       frames,
       warmup,
       canvasSelector,
+      statsIntervalMs,
       ...exporterPayload(),
     };
   }
 
-  const duration = Math.max(1, Number(durationEl.value || "10"));
+  const duration = toNonNegativeNumber(durationEl.value, 10);
+  const maxPendingCaptures = Math.max(
+    1,
+    toPositiveInt(maxPendingCapturesEl.value, 2)
+  );
+
   return {
     kind: "live",
     fps,
@@ -187,6 +272,8 @@ function currentPayload() {
     policy: policyEl.value,
     concurrency: Math.max(1, Math.floor(Number(concurrencyEl.value || "2"))),
     maxQueue: Math.max(0, Math.floor(Number(maxQueueEl.value || "8"))),
+    maxPendingCaptures,
+    statsIntervalMs,
     ...exporterPayload(),
   };
 }
@@ -201,6 +288,12 @@ function start() {
   appendLog(
     `start: ${payload.kind} fps=${payload.fps} canvas=${payload.canvasSelector}`
   );
+  runtimeState.status = "running";
+  runtimeState.message = "starting";
+  runtimeState.progressDone = 0;
+  runtimeState.progressTotal = 0;
+  runtimeState.stats = null;
+  renderStats();
 
   // start recording -> prefer passthrough + focus canvas
   setPassthrough(true, { silent: true });
@@ -219,7 +312,12 @@ function start() {
   }
 
   clearTimeout(stopTimer);
-  stopTimer = setTimeout(() => stop(), payload.duration * 1000);
+  if (payload.duration > 0) {
+    stopTimer = setTimeout(() => stop(), payload.duration * 1000);
+  } else {
+    stopTimer = null;
+    appendLog("live duration=0 (manual stop)");
+  }
 }
 
 function stop() {
@@ -317,7 +415,14 @@ window.addEventListener("message", (ev) => {
   if (msg.type === "pa_status") {
     const status = msg.status || "";
     const message = msg.message || "";
-    appendLog(message ? `${status}: ${message}` : String(status));
+    const line = message ? `${status}: ${message}` : String(status);
+    if (line !== lastStatusLog) {
+      appendLog(line);
+      lastStatusLog = line;
+    }
+    runtimeState.status = status || "idle";
+    runtimeState.message = message || "";
+    renderStats();
 
     if (status === "idle") {
       setRunning(false);
@@ -332,21 +437,25 @@ window.addEventListener("message", (ev) => {
   }
 
   if (msg.type === "pa_progress") {
-    const done = Number(msg.done ?? 0);
-    const total = Number(msg.total ?? 0);
-    appendLog(`progress: ${done}/${total}`);
+    runtimeState.progressDone = Number(msg.done ?? 0);
+    runtimeState.progressTotal = Number(msg.total ?? 0);
+    renderStats();
     return;
   }
 
   if (msg.type === "pa_stats") {
     const safe = { ...msg };
     delete safe.type;
-    appendLog(`stats: ${JSON.stringify(safe)}`);
+    runtimeState.stats = safe;
+    renderStats();
     return;
   }
 
   if (msg.type === "pa_error") {
     appendLog(`ERROR: ${msg.message || "unknown error"}`);
+    runtimeState.status = "error";
+    runtimeState.message = msg.message || "unknown error";
+    renderStats();
     setRunning(false);
   }
 });
@@ -361,6 +470,7 @@ window.addEventListener("message", (ev) => {
 
   setRunning(false);
   syncModeUI();
+  renderStats();
 
   fillCanvasDropdown([]);
   appendLog("loading preview...");

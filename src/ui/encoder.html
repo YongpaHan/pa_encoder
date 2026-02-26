@@ -140,6 +140,20 @@
         word-break: break-word;
       }
 
+      .stats {
+        margin-top: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 12px;
+        padding: 10px;
+        background: rgba(0, 0, 0, 0.22);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+        font-size: 12.5px;
+        line-height: 1.4;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
       /* Inputs */
       button,
       input,
@@ -418,7 +432,26 @@
               <label>MaxQueue</label>
               <input id="maxQueue" type="number" min="0" step="1" value="8" />
               <label>Duration</label>
-              <input id="duration" type="number" min="1" step="1" value="10" />
+              <input id="duration" type="number" min="0" step="1" value="10" />
+            </div>
+
+            <div class="row2">
+              <label>PendingCap</label>
+              <input
+                id="maxPendingCaptures"
+                type="number"
+                min="1"
+                step="1"
+                value="2"
+              />
+              <label>Stats(ms)</label>
+              <input
+                id="statsIntervalMs"
+                type="number"
+                min="50"
+                step="10"
+                value="180"
+              />
             </div>
           </details>
 
@@ -442,6 +475,8 @@
             <button id="btnStop" class="btnDanger" disabled>Stop</button>
           </div>
 
+          <div id="stats" class="stats">status: idle</div>
+
           <div class="hint">
             Hotkeys (only when not recording):
             <br />
@@ -454,6 +489,8 @@
             - D: dock position
             <br />
             - Space: start
+            <br />
+            Duration=0 means manual stop.
             <br />
             During recording, keyboard is not captured by the UI. Use Focus
             Sketch if needed, then click the canvas to ensure focus.

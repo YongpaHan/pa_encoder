@@ -1,4 +1,4 @@
-HTML canvas frame encoder made for personal use (ツ)
+HTML canvas frame encoder made for personal use.
 
 # Installation
 
@@ -31,6 +31,11 @@ pa_encoder --url http://localhost:5173 --entry /src/main.js
 
 The UI shows a live preview, capture controls, and progress logs.
 
+Live mode UI tips:
+- `Duration=0` means manual stop
+- `PendingCap` limits concurrent canvas snapshot tasks
+- `Stats(ms)` controls status update interval to keep UI lightweight
+
 ---
 
 ## JavaScript API
@@ -43,14 +48,20 @@ import { startLiveCapture, createZipExporter } from "pa_encoder";
 const canvas = document.querySelector("canvas");
 const exporter = await createZipExporter({ zipName: "frames.zip" });
 
-const { stop } = await startLiveCapture({
+const session = await startLiveCapture({
   canvas,
   exporter,
   fps: 30,
+  maxPendingCaptures: 2,
 });
 
-await stop();
+await session.stop();
 ```
+
+`startLiveCapture()` returns `{ stop, stats, done }`:
+- `stop()` finalizes capture/export
+- `stats` is the live mutable stats object
+- `done` resolves when capture fully stops/finalizes
 
 ---
 
@@ -133,7 +144,3 @@ Uses File System export when available, otherwise ZIP.
   - `createImageBitmap`
 - ZIP export works in most modern browsers
 - File System export requires Chromium + secure context
-
----
-
-(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)(ツ)^0^

@@ -5,6 +5,7 @@ async function startLiveCapture({
   fps = 30,
   concurrency = 2,
   maxQueue = 8,
+  maxPendingCaptures = null,
   policy = "drop",
   // "drop" | "block"
   onProgress,
@@ -22,6 +23,9 @@ async function startLiveCapture({
     throw new TypeError("concurrency must be >= 1");
   if (!Number.isInteger(maxQueue) || maxQueue < 0)
     throw new TypeError("maxQueue must be >= 0");
+  if (maxPendingCaptures != null && (!Number.isInteger(maxPendingCaptures) || maxPendingCaptures < 1)) {
+    throw new TypeError("maxPendingCaptures must be >= 1");
+  }
   if (policy !== "drop" && policy !== "block")
     throw new TypeError('policy must be "drop" or "block"');
   const worker = new Worker(new URL("./worker.js", import.meta.url), {
@@ -32,22 +36,31 @@ async function startLiveCapture({
       var _a, _b;
       if (((_a = ev.data) == null ? void 0 : _a.type) === "ready") {
         worker.removeEventListener("message", onMsg);
+        worker.removeEventListener("error", onErr);
         resolve();
       } else if (((_b = ev.data) == null ? void 0 : _b.type) === "error") {
         worker.removeEventListener("message", onMsg);
+        worker.removeEventListener("error", onErr);
         reject(new Error(ev.data.message || "Worker error"));
       }
     };
+    const onErr = (ev) => {
+      worker.removeEventListener("message", onMsg);
+      worker.removeEventListener("error", onErr);
+      reject(ev.error || new Error("Worker failed to initialize"));
+    };
     worker.addEventListener("message", onMsg);
-    worker.addEventListener("error", reject);
+    worker.addEventListener("error", onErr);
   });
   const stats = {
     captured: 0,
     encoded: 0,
     written: 0,
     dropped: 0,
+    failed: 0,
     queueMax: 0,
     inFlightMax: 0,
+    pendingCaptureMax: 0,
     lastBitmapMs: 0,
     bitmapMsAvg: 0,
     lastEncodeMs: 0,
@@ -55,65 +68,171 @@ async function startLiveCapture({
     lastWriteMs: 0,
     writeMsAvg: 0
   };
+  const maxCaptureTasks = maxPendingCaptures == null ? Math.max(1, Math.min(4, concurrency)) : maxPendingCaptures;
+  const frameIntervalMs = 1e3 / fps;
+  const maxCatchUpFrames = 4;
+  const maxAccumMs = frameIntervalMs * maxCatchUpFrames;
   let stopped = false;
   let rafId = null;
+  let fatalError = null;
   let inFlight = 0;
+  let pendingCaptures = 0;
+  let accMs = 0;
+  let lastTickMs = null;
+  let seq = 0;
   const queue = [];
   const waiters = [];
   const ack = /* @__PURE__ */ new Map();
+  const captureTasks = /* @__PURE__ */ new Set();
+  let doneSettled = false;
+  let resolveDone = null;
+  const done = new Promise((resolve) => {
+    resolveDone = resolve;
+  });
+  function isAbortError(err) {
+    return (err == null ? void 0 : err.name) === "AbortError" || (err == null ? void 0 : err.message) === "stopped" || (err == null ? void 0 : err.message) === "Aborted";
+  }
+  function emitProgress() {
+    onProgress == null ? void 0 : onProgress({ ...stats });
+  }
   function throwIfAborted() {
+    if (fatalError) throw fatalError;
     if (signal == null ? void 0 : signal.aborted) {
       throw signal.reason ?? new DOMException("Aborted", "AbortError");
     }
   }
-  function wakeOneWaiter() {
-    const w = waiters.shift();
-    if (w) w();
+  function wakeAllWaiters() {
+    while (waiters.length) {
+      const w = waiters.shift();
+      if (w) w();
+    }
   }
-  async function enqueueFrame(item) {
+  function releaseBitmap(bitmap) {
+    if (typeof (bitmap == null ? void 0 : bitmap.close) === "function") {
+      try {
+        bitmap.close();
+      } catch {
+      }
+    }
+  }
+  function settleDone(value) {
+    if (doneSettled) return;
+    doneSettled = true;
+    resolveDone == null ? void 0 : resolveDone(value);
+  }
+  function dispatchFrame(item) {
+    inFlight++;
+    stats.inFlightMax = Math.max(stats.inFlightMax, inFlight);
+    const { seq: seq2, bitmap, w, h } = item;
+    const p = new Promise((resolve, reject) => ack.set(seq2, { resolve, reject }));
+    worker.postMessage(
+      { type: "encode", frameIndex: seq2, bitmap, width: w, height: h },
+      [bitmap]
+    );
+    p.catch(() => {
+    });
+  }
+  function dispatchIfPossible() {
+    while (!stopped && inFlight < concurrency && queue.length > 0) {
+      const item = queue.shift();
+      dispatchFrame(item);
+      wakeAllWaiters();
+    }
+  }
+  async function pushCapturedFrame(item) {
+    if (stopped) {
+      releaseBitmap(item.bitmap);
+      return false;
+    }
+    if (inFlight < concurrency) {
+      dispatchFrame(item);
+      return true;
+    }
     if (policy === "drop") {
       if (queue.length >= maxQueue) {
         stats.dropped++;
-        if (typeof item.bitmap.close === "function") item.bitmap.close();
-        onProgress == null ? void 0 : onProgress({ ...stats });
+        releaseBitmap(item.bitmap);
         return false;
       }
       queue.push(item);
       stats.queueMax = Math.max(stats.queueMax, queue.length);
       return true;
     }
-    while (queue.length >= maxQueue) {
+    if (maxQueue === 0) {
+      while (!stopped && inFlight >= concurrency) {
+        await new Promise((r) => waiters.push(r));
+        throwIfAborted();
+      }
+      if (stopped) {
+        releaseBitmap(item.bitmap);
+        return false;
+      }
+      dispatchFrame(item);
+      return true;
+    }
+    while (!stopped && queue.length >= maxQueue) {
       await new Promise((r) => waiters.push(r));
       throwIfAborted();
-      if (stopped) return false;
+    }
+    if (stopped) {
+      releaseBitmap(item.bitmap);
+      return false;
     }
     queue.push(item);
     stats.queueMax = Math.max(stats.queueMax, queue.length);
     return true;
   }
-  function dispatchIfPossible() {
-    while (!stopped && inFlight < concurrency && queue.length > 0) {
-      const item = queue.shift();
-      wakeOneWaiter();
-      inFlight++;
-      stats.inFlightMax = Math.max(stats.inFlightMax, inFlight);
-      const { seq: seq2, bitmap, w, h } = item;
-      const p = new Promise(
-        (resolve, reject) => ack.set(seq2, { resolve, reject })
-      );
-      worker.postMessage(
-        { type: "encode", frameIndex: seq2, bitmap, width: w, height: h },
-        [bitmap]
-      );
-      p.catch(() => {
-      });
+  function canScheduleCapture() {
+    if (stopped) return false;
+    if (pendingCaptures >= maxCaptureTasks) return false;
+    if (policy === "drop") {
+      const buffered = queue.length + inFlight + pendingCaptures;
+      const capacity = maxQueue + concurrency;
+      return buffered < capacity;
     }
+    if (maxQueue === 0) return inFlight < concurrency;
+    return queue.length < maxQueue || inFlight < concurrency;
+  }
+  function scheduleCaptureFrame() {
+    pendingCaptures++;
+    stats.pendingCaptureMax = Math.max(stats.pendingCaptureMax, pendingCaptures);
+    let task = null;
+    task = (async () => {
+      throwIfAborted();
+      const w = canvas.width;
+      const h = canvas.height;
+      const b0 = performance.now();
+      const bitmap = await createImageBitmap(canvas);
+      const b1 = performance.now();
+      const bitmapMs = b1 - b0;
+      stats.lastBitmapMs = bitmapMs;
+      stats.bitmapMsAvg = stats.bitmapMsAvg ? stats.bitmapMsAvg * 0.9 + bitmapMs * 0.1 : bitmapMs;
+      stats.captured++;
+      await pushCapturedFrame({
+        seq: seq++,
+        bitmap,
+        w,
+        h
+      });
+    })().catch((err) => {
+      if (!stopped && !isAbortError(err)) {
+        stats.failed++;
+        console.error("capture failed:", err);
+      }
+    }).finally(() => {
+      pendingCaptures--;
+      captureTasks.delete(task);
+      dispatchIfPossible();
+      wakeAllWaiters();
+      emitProgress();
+    });
+    captureTasks.add(task);
   }
   worker.addEventListener("message", async (ev) => {
     const msg = ev.data;
     if (!msg || typeof msg !== "object") return;
     if (msg.type === "frame") {
-      const { frameIndex: seq2, blob, encodeMs } = msg;
+      const { frameIndex: frameSeq, blob, encodeMs } = msg;
       stats.encoded++;
       if (typeof encodeMs === "number") {
         stats.lastEncodeMs = encodeMs;
@@ -121,31 +240,45 @@ async function startLiveCapture({
       }
       try {
         const w0 = performance.now();
-        await exporter.write(seq2, blob);
+        await exporter.write(frameSeq, blob);
         const w1 = performance.now();
         stats.written++;
         const writeMs = w1 - w0;
         stats.lastWriteMs = writeMs;
         stats.writeMsAvg = stats.writeMsAvg ? stats.writeMsAvg * 0.9 + writeMs * 0.1 : writeMs;
-        const entry = ack.get(seq2);
+        const entry = ack.get(frameSeq);
         if (entry) entry.resolve();
       } catch (err) {
-        const entry = ack.get(seq2);
+        stats.failed++;
+        const entry = ack.get(frameSeq);
         if (entry) entry.reject(err);
       } finally {
-        ack.delete(seq2);
-        inFlight--;
+        ack.delete(frameSeq);
+        inFlight = Math.max(0, inFlight - 1);
         dispatchIfPossible();
-        onProgress == null ? void 0 : onProgress({ ...stats });
+        wakeAllWaiters();
+        emitProgress();
       }
-    } else if (msg.type === "error") {
-      console.error("Worker error:", msg.message);
+      return;
+    }
+    if (msg.type === "error") {
+      const frameSeq = Number(msg.frameIndex);
+      const err = new Error(msg.message || "Worker error");
+      stats.failed++;
+      if (Number.isInteger(frameSeq)) {
+        const entry = ack.get(frameSeq);
+        if (entry) entry.reject(err);
+        ack.delete(frameSeq);
+        inFlight = Math.max(0, inFlight - 1);
+        dispatchIfPossible();
+        wakeAllWaiters();
+      } else {
+        fatalError = err;
+      }
+      console.error("Worker error:", err.message);
+      emitProgress();
     }
   });
-  const frameIntervalMs = 1e3 / fps;
-  let accMs = 0;
-  let lastTickMs = null;
-  let seq = 0;
   function tick(ts) {
     if (stopped) return;
     try {
@@ -159,47 +292,64 @@ async function startLiveCapture({
     const dt = ts - lastTickMs;
     lastTickMs = ts;
     accMs += dt;
-    while (accMs >= frameIntervalMs) {
-      accMs -= frameIntervalMs;
-      const b0 = performance.now();
-      createImageBitmap(canvas).then(async (bitmap) => {
-        const b1 = performance.now();
-        const bitmapMs = b1 - b0;
-        stats.lastBitmapMs = bitmapMs;
-        stats.bitmapMsAvg = stats.bitmapMsAvg ? stats.bitmapMsAvg * 0.9 + bitmapMs * 0.1 : bitmapMs;
-        if (stopped) {
-          if (typeof bitmap.close === "function") bitmap.close();
-          return;
-        }
-        stats.captured++;
-        const ok = await enqueueFrame({
-          seq: seq++,
-          bitmap,
-          w: canvas.width,
-          h: canvas.height
-        });
-        if (ok) dispatchIfPossible();
-        onProgress == null ? void 0 : onProgress({ ...stats });
-      }).catch((e) => console.error("createImageBitmap failed:", e));
+    if (accMs > maxAccumMs) {
+      const dropFrames = Math.floor((accMs - maxAccumMs) / frameIntervalMs);
+      if (dropFrames > 0) {
+        stats.dropped += dropFrames;
+        accMs -= dropFrames * frameIntervalMs;
+      }
+      if (accMs > maxAccumMs) accMs = maxAccumMs;
     }
+    let loopGuard = 0;
+    while (accMs >= frameIntervalMs && loopGuard < maxCatchUpFrames) {
+      if (!canScheduleCapture()) {
+        if (policy === "drop") {
+          stats.dropped++;
+          accMs -= frameIntervalMs;
+          loopGuard++;
+          continue;
+        }
+        break;
+      }
+      accMs -= frameIntervalMs;
+      scheduleCaptureFrame();
+      loopGuard++;
+    }
+    emitProgress();
     rafId = requestAnimationFrame(tick);
   }
   rafId = requestAnimationFrame(tick);
   async function stop() {
-    if (stopped) return;
+    if (stopped) return done;
     stopped = true;
     if (rafId != null) cancelAnimationFrame(rafId);
-    while (waiters.length) wakeOneWaiter();
-    for (const item of queue.splice(0, queue.length)) {
-      if (typeof item.bitmap.close === "function") item.bitmap.close();
+    let stopError = null;
+    try {
+      wakeAllWaiters();
+      const tasks = Array.from(captureTasks);
+      if (tasks.length > 0) {
+        await Promise.allSettled(tasks);
+      }
+      for (const item of queue.splice(0, queue.length)) {
+        releaseBitmap(item.bitmap);
+      }
+      while (inFlight > 0 || ack.size > 0) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      await exporter.finalize();
+    } catch (err) {
+      stopError = err;
+      throw err;
+    } finally {
+      try {
+        worker.terminate();
+      } catch {
+      }
+      settleDone({ error: stopError ?? fatalError ?? null });
     }
-    while (inFlight > 0 || ack.size > 0) {
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    await exporter.finalize();
-    worker.terminate();
+    return done;
   }
-  return { stop, stats };
+  return { stop, stats, done };
 }
 
 // src/virtual_time.js

@@ -24,13 +24,22 @@ self.onmessage = async (ev) => {
 
     ctx.clearRect(0, 0, width, height);
     ctx.drawImage(bitmap, 0, 0);
-    if (typeof bitmap.close === "function") bitmap.close();
 
     const blob = await offscreen.convertToBlob({ type: "image/png" });
     const t1 = performance.now();
 
     self.postMessage({ type: "frame", frameIndex, blob, encodeMs: t1 - t0 });
   } catch (e) {
-    self.postMessage({ type: "error", message: e?.message ?? String(e) });
+    self.postMessage({
+      type: "error",
+      frameIndex,
+      message: e?.message ?? String(e),
+    });
+  } finally {
+    if (typeof bitmap?.close === "function") {
+      try {
+        bitmap.close();
+      } catch {}
+    }
   }
 };

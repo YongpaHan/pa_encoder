@@ -16,6 +16,47 @@ function post(type, data = {}) {
   } catch {}
 }
 
+function toPositiveInt(v, fallback) {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n <= 0) return fallback;
+  return n;
+}
+
+function createThrottledPoster(type, intervalMs = 160) {
+  let latest = null;
+  const timer = setInterval(() => {
+    if (!latest) return;
+    post(type, latest);
+    latest = null;
+  }, Math.max(50, intervalMs));
+
+  return {
+    push(data) {
+      latest = data;
+    },
+    flush() {
+      if (!latest) return;
+      post(type, latest);
+      latest = null;
+    },
+    stop() {
+      clearInterval(timer);
+      latest = null;
+    },
+  };
+}
+
+function throttle(fn, waitMs = 120) {
+  let timeoutId = null;
+  return (...args) => {
+    if (timeoutId) return;
+    timeoutId = setTimeout(() => {
+      timeoutId = null;
+      fn(...args);
+    }, waitMs);
+  };
+}
+
 async function importEntry(entry) {
   await import(entry);
 }
@@ -47,6 +88,76 @@ function buildCanvasList() {
 function sendCanvasList() {
   const canvases = buildCanvasList();
   post("pa_preview_canvas_list", { count: canvases.length, canvases });
+}
+
+function findCanvasDeep({
+  selector = "canvas",
+  includeShadow = true,
+  maxIframeDepth = 8,
+  doc = document,
+  _depth = 0,
+} = {}) {
+  if (!doc || _depth > maxIframeDepth) return null;
+
+  try {
+    const el = doc.querySelector(selector);
+    if (el instanceof HTMLCanvasElement) return el;
+  } catch {}
+
+  if (includeShadow) {
+    let all = [];
+    try {
+      all = doc.querySelectorAll("*");
+    } catch {
+      all = [];
+    }
+    for (const host of all) {
+      const sr = host.shadowRoot;
+      if (!sr) continue;
+      try {
+        const el = sr.querySelector(selector);
+        if (el instanceof HTMLCanvasElement) return el;
+      } catch {}
+      try {
+        const fallback = sr.querySelector("canvas");
+        if (fallback instanceof HTMLCanvasElement) return fallback;
+      } catch {}
+    }
+  }
+
+  let iframes = [];
+  try {
+    iframes = doc.querySelectorAll("iframe");
+  } catch {
+    iframes = [];
+  }
+  for (const iframe of iframes) {
+    let childDoc = null;
+    try {
+      childDoc = iframe.contentDocument;
+    } catch {
+      childDoc = null;
+    }
+    if (!childDoc) continue;
+    const found = findCanvasDeep({
+      selector,
+      includeShadow,
+      maxIframeDepth,
+      doc: childDoc,
+      _depth: _depth + 1,
+    });
+    if (found) return found;
+  }
+
+  return null;
+}
+
+function resolveCanvas(selector = "canvas") {
+  try {
+    const direct = document.querySelector(selector);
+    if (direct instanceof HTMLCanvasElement) return direct;
+  } catch {}
+  return findCanvasDeep({ selector }) || findCanvasDeep({ selector: "canvas" });
 }
 
 function canvasToBlob(canvas, type = "image/png") {
@@ -103,7 +214,7 @@ window.addEventListener("message", async (ev) => {
 
   if (msg.type === "pa_focus_canvas") {
     const sel = msg.payload?.canvasSelector || "canvas";
-    const c = document.querySelector(sel) || document.querySelector("canvas");
+    const c = resolveCanvas(sel);
     if (c instanceof HTMLCanvasElement) focusCanvasBestEffort(c);
     return;
   }
@@ -136,6 +247,14 @@ async function runFrameAutostart(payload, entry) {
   let exporter = null;
   let didFinalize = false;
   let firstCanvasFocused = false;
+  const progressPoster = createThrottledPoster(
+    "pa_progress",
+    toPositiveInt(p?.statsIntervalMs, 120)
+  );
+  const statsPoster = createThrottledPoster(
+    "pa_stats",
+    toPositiveInt(p?.statsIntervalMs, 120)
+  );
 
   try {
     exporter = await createExporterFromPayload(p);
@@ -163,9 +282,7 @@ async function runFrameAutostart(payload, entry) {
         start: async () => {
           await importEntry(entry);
           // after import, try focus if canvas already exists
-          const c =
-            document.querySelector(canvasSelector) ||
-            document.querySelector("canvas");
+          const c = resolveCanvas(canvasSelector);
           if (c instanceof HTMLCanvasElement) {
             focusCanvasBestEffort(c);
             firstCanvasFocused = true;
@@ -186,8 +303,8 @@ async function runFrameAutostart(payload, entry) {
           await exporter.write(frameIndex, blob);
 
           written++;
-          post("pa_progress", { done: written, total: frames });
-          post("pa_stats", { written, captured: i + 1 });
+          progressPoster.push({ done: written, total: frames });
+          statsPoster.push({ written, captured: i + 1 });
         },
       });
     } catch (e) {
@@ -202,6 +319,8 @@ async function runFrameAutostart(payload, entry) {
       await exporter.finalize();
       didFinalize = true;
     }
+    progressPoster.flush();
+    statsPoster.flush();
 
     post("pa_status", {
       status: "idle",
@@ -216,6 +335,8 @@ async function runFrameAutostart(payload, entry) {
         await exporter.finalize();
       } catch {}
     }
+    progressPoster.stop();
+    statsPoster.stop();
     running = false;
     stopFlag = false;
   }
@@ -230,13 +351,15 @@ async function runLive(p) {
 
   let exporter = null;
   let didFinalize = false;
+  const statsPoster = createThrottledPoster(
+    "pa_stats",
+    toPositiveInt(p?.statsIntervalMs, 180)
+  );
 
   try {
     exporter = await createExporterFromPayload(p);
 
-    const canvas =
-      document.querySelector(canvasSelector) ||
-      document.querySelector("canvas");
+    const canvas = resolveCanvas(canvasSelector);
     if (!(canvas instanceof HTMLCanvasElement)) {
       throw new Error(`Canvas not found: ${canvasSelector}`);
     }
@@ -250,28 +373,44 @@ async function runLive(p) {
     }, 50);
 
     try {
-      const { stop } = await startLiveCapture({
+      const session = await startLiveCapture({
         canvas,
         exporter,
         fps: Number(p.fps ?? 30),
         concurrency: Number(p.concurrency ?? 2),
         maxQueue: Number(p.maxQueue ?? 8),
+        maxPendingCaptures: toPositiveInt(p.maxPendingCaptures, undefined),
         policy: p.policy ?? "drop",
         signal: ac.signal,
-        onProgress: (stats) => post("pa_stats", stats),
+        onProgress: (stats) => statsPoster.push(stats),
       });
 
       post("pa_status", { status: "running", message: "capturing..." });
 
-      await new Promise((_, reject) => {
-        ac.signal.addEventListener("abort", () => reject(ac.signal.reason));
-      }).catch(async (e) => {
-        await stop();
+      const result = await Promise.race([
+        new Promise((resolve) => {
+          ac.signal.addEventListener(
+            "abort",
+            () => resolve({ kind: "abort", reason: ac.signal.reason }),
+            { once: true }
+          );
+        }),
+        Promise.resolve(session.done).then((v) => ({ kind: "done", value: v })),
+      ]);
+
+      if (result.kind === "abort") {
+        await session.stop();
         didFinalize = true;
-        throw e;
-      });
+        throw result.reason ?? new Error("stopped");
+      }
+
+      didFinalize = true;
+      const err = result.value?.error;
+      if (err) throw err;
+      throw new Error("stopped");
     } finally {
       clearInterval(stopWatcher);
+      statsPoster.flush();
     }
   } catch (e) {
     if ((e?.message ?? "") === "stopped") {
@@ -286,6 +425,7 @@ async function runLive(p) {
         await exporter.finalize();
       } catch {}
     }
+    statsPoster.stop();
     running = false;
     stopFlag = false;
   }
@@ -296,7 +436,8 @@ async function runLive(p) {
   post("pa_preview_ready", { entry });
 
   sendCanvasList();
-  const mo = new MutationObserver(() => sendCanvasList());
+  const sendCanvasListThrottled = throttle(sendCanvasList, 120);
+  const mo = new MutationObserver(() => sendCanvasListThrottled());
   mo.observe(document.documentElement, { childList: true, subtree: true });
   setTimeout(sendCanvasList, 250);
   setTimeout(sendCanvasList, 1000);
