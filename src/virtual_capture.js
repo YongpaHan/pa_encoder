@@ -272,6 +272,7 @@ export async function virtualTimeCaptureFromStart({
   hookTimers = true,
 
   frameCount = 60,
+  onCanvasReady = null,
   onFrame = null,
 } = {}) {
   debugSnapshot("virtualTimeCaptureFromStart begin");
@@ -294,6 +295,10 @@ export async function virtualTimeCaptureFromStart({
       canvasWaitFrames,
       includeShadow,
     });
+
+    if (typeof onCanvasReady === "function") {
+      await onCanvasReady(canvas, vt);
+    }
 
     for (let i = 0; i < frameCount; i++) {
       vt.step(1);

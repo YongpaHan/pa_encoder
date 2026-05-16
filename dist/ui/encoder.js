@@ -19,6 +19,15 @@ const statsIntervalMsEl = $("statsIntervalMs");
 
 const framesEl = $("frames");
 const warmupEl = $("warmup");
+const frameEncodeWorkersEl = $("frameEncodeWorkers");
+const frameMaxEncodeQueueEl = $("frameMaxEncodeQueue");
+const frameMaxPendingBitmapsEl = $("frameMaxPendingBitmaps");
+const frameWriteConcurrencyEl = $("frameWriteConcurrency");
+const frameRenderWaitModeEl = $("frameRenderWaitMode");
+const frameRenderWaitTimeoutMsEl = $("frameRenderWaitTimeoutMs");
+const frameOutputWidthEl = $("frameOutputWidth");
+const frameOutputHeightEl = $("frameOutputHeight");
+const frameOutputDprEl = $("frameOutputDpr");
 
 const detailsLive = $("detailsLive");
 const detailsFrame = $("detailsFrame");
@@ -40,6 +49,8 @@ const preview = $("preview");
 
 let running = false;
 let stopTimer = null;
+let exportSessionSeq = 1;
+const parentExportSessions = new Map();
 
 const docks = ["dock-br", "dock-bl", "dock-tr", "dock-tl"];
 let dockIndex = 0;
@@ -130,6 +141,18 @@ function renderStats() {
         `encode ms: ${nfmt(s.lastEncodeMs)}/${nfmt(s.encodeMsAvg)}   ` +
         `write ms: ${nfmt(s.lastWriteMs)}/${nfmt(s.writeMsAvg)}`
     );
+    if (s.mode === "frame") {
+      lines.push(
+        `render wait: ${s.renderWaitKind ?? "none"} ${nfmt(
+          s.lastRenderWaitMs
+        )}/${nfmt(s.renderWaitMsAvg)}   finalize ms: ${nfmt(s.finalizeMs)}`
+      );
+      lines.push(
+        `queues: encode ${s.encodeQueue ?? 0}  write ${
+          s.writeQueue ?? 0
+        }  heldBmp ${s.heldBitmaps ?? 0}`
+      );
+    }
     lines.push(
       `queueMax: ${s.queueMax ?? 0}   inFlightMax: ${
         s.inFlightMax ?? 0
@@ -198,6 +221,95 @@ function exporterPayload() {
   return { exporter: { mode, prefer: "fs", zipName } };
 }
 
+function frameFilename(i) {
+  return `frame_${String(i).padStart(6, "0")}.png`;
+}
+
+function canUseParentFsExporter() {
+  return (
+    window.isSecureContext === true && "showDirectoryPicker" in window
+  );
+}
+
+async function prepareExporterPayload(payload) {
+  const requested = payload.exporter?.mode || "best";
+  const wantsFs = requested === "fs" || requested === "best";
+  if (!wantsFs) return payload;
+
+  if (!canUseParentFsExporter()) {
+    if (requested === "fs") {
+      throw new Error("File System Access API is not supported here.");
+    }
+    return {
+      ...payload,
+      exporter: { ...payload.exporter, mode: "zip" },
+    };
+  }
+
+  const dirHandle = await window.showDirectoryPicker({
+    id: "pa-encoder-frames",
+    mode: "readwrite",
+  });
+  const sessionId = `fs-${Date.now()}-${exportSessionSeq++}`;
+  parentExportSessions.set(sessionId, { dirHandle });
+
+  return {
+    ...payload,
+    exporter: {
+      ...payload.exporter,
+      mode: "parent-fs",
+      sessionId,
+    },
+  };
+}
+
+function postExportAck(requestId, ok, message = "") {
+  const w = preview.contentWindow;
+  if (!w) return;
+  w.postMessage({ type: "pa_export_ack", requestId, ok, message }, "*");
+}
+
+async function handleParentExportWrite(msg) {
+  const requestId = msg.requestId;
+  try {
+    const session = parentExportSessions.get(msg.sessionId);
+    if (!session) throw new Error("Export directory session was not found.");
+
+    const frameIndex = Number(msg.frameIndex);
+    if (!Number.isInteger(frameIndex) || frameIndex < 0) {
+      throw new Error(`Invalid frame index: ${msg.frameIndex}`);
+    }
+    if (
+      !msg.blob ||
+      typeof msg.blob.arrayBuffer !== "function" ||
+      typeof msg.blob.size !== "number"
+    ) {
+      throw new Error("Export write did not receive a Blob.");
+    }
+
+    const fileHandle = await session.dirHandle.getFileHandle(
+      frameFilename(frameIndex),
+      { create: true }
+    );
+    const writable = await fileHandle.createWritable();
+    await writable.write(msg.blob);
+    await writable.close();
+    postExportAck(requestId, true);
+  } catch (e) {
+    postExportAck(requestId, false, e?.message || String(e));
+  }
+}
+
+async function handleParentExportFinalize(msg) {
+  const requestId = msg.requestId;
+  try {
+    parentExportSessions.delete(msg.sessionId);
+    postExportAck(requestId, true);
+  } catch (e) {
+    postExportAck(requestId, false, e?.message || String(e));
+  }
+}
+
 function setDockByIndex(i) {
   for (const d of docks) document.body.classList.remove(d);
   dockIndex = ((i % docks.length) + docks.length) % docks.length;
@@ -247,6 +359,16 @@ function currentPayload() {
   if (kind === "frame") {
     const frames = Math.max(1, Math.floor(Number(framesEl.value || "300")));
     const warmup = Math.max(0, Math.floor(Number(warmupEl.value || "0")));
+    const outputWidth = Math.max(
+      0,
+      Math.floor(Number(frameOutputWidthEl.value || "0"))
+    );
+    const outputHeight = Math.max(
+      0,
+      Math.floor(Number(frameOutputHeightEl.value || "0"))
+    );
+    const outputDpr = toNonNegativeNumber(frameOutputDprEl.value, 0);
+
     return {
       kind: "frame",
       fps,
@@ -254,6 +376,30 @@ function currentPayload() {
       warmup,
       canvasSelector,
       statsIntervalMs,
+      encodeWorkers: Math.max(
+        1,
+        Math.floor(Number(frameEncodeWorkersEl.value || "3"))
+      ),
+      maxEncodeQueue: Math.max(
+        0,
+        Math.floor(Number(frameMaxEncodeQueueEl.value || "8"))
+      ),
+      maxPendingBitmaps: Math.max(
+        1,
+        Math.floor(Number(frameMaxPendingBitmapsEl.value || "4"))
+      ),
+      writeConcurrency: Math.max(
+        1,
+        Math.floor(Number(frameWriteConcurrencyEl.value || "1"))
+      ),
+      renderWaitMode: frameRenderWaitModeEl.value || "auto",
+      renderWaitTimeoutMs: Math.max(
+        0,
+        Math.floor(Number(frameRenderWaitTimeoutMsEl.value || "5000"))
+      ),
+      outputWidth,
+      outputHeight,
+      outputDpr,
       ...exporterPayload(),
     };
   }
@@ -278,11 +424,19 @@ function currentPayload() {
   };
 }
 
-function start() {
+async function start() {
   if (running) return;
 
-  const payload = currentPayload();
+  let payload = currentPayload();
   const entry = entryEl.value.trim() || "/src/main.js";
+
+  try {
+    payload = await prepareExporterPayload(payload);
+  } catch (e) {
+    appendLog(`ERROR: ${e?.message || String(e)}`);
+    setRunning(false);
+    return;
+  }
 
   setRunning(true);
   appendLog(
@@ -400,6 +554,16 @@ window.addEventListener("keydown", (e) => {
 window.addEventListener("message", (ev) => {
   const msg = ev.data;
   if (!msg || typeof msg !== "object") return;
+
+  if (msg.type === "pa_export_write") {
+    handleParentExportWrite(msg);
+    return;
+  }
+
+  if (msg.type === "pa_export_finalize") {
+    handleParentExportFinalize(msg);
+    return;
+  }
 
   if (msg.type === "pa_preview_ready") {
     appendLog(`preview ready (entry=${msg.entry})`);
